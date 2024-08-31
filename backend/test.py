@@ -1,167 +1,63 @@
 
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI,UploadFile
 import pandas as pd
 import io
 from fastapi.responses import StreamingResponse
-
+from sqlalchemy import create_engine,types,text
+import json
+import numpy as np
+from fastapi import UploadFile, File, HTTPException
+from fastapi.responses import JSONResponse
+import logging
+from datetime import datetime
 app = FastAPI()
 
 @app.get("/")
 async def hello():
     return {"message": "Hello World"}
 
-@app.post("/upload-1/")
-async def upload_csv(file: UploadFile = File(...)):
-    try:
-        # Check if the uploaded file is a CSV or Excel file
-        if file.content_type not in ["text/csv", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]:
-            return {"error": "File must be a CSV or XLSX"}
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-        contents = await file.read()
-
-        # Read the file into a DataFrame
-        if file.content_type == "text/csv":
-            df = pd.read_csv(io.StringIO(contents.decode("utf-8")))
-        else:
-            df = pd.read_excel(io.BytesIO(contents))
-
-        if df.empty:
-            return {"error": "Uploaded file is empty or not properly formatted"}
-
-        # Process the DataFrame
-        df = df[df["Transaction Type"] != "Cancel"]
-        df["Transaction Type"] = df["Transaction Type"].replace({
-            "Refund": "Return",
-            "FreeReplacement": "Return"
-        })
-        df = df.fillna("")
-
-       
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df.to_excel(writer, index=False, sheet_name='ProcessedData')
-        output.seek(0)
-
-        
-        
-        headers = {
-            'Content-Disposition': f'attachment; filename="{file.filename.split(".")[0]}_processed.xlsx"'
-        }
-        return StreamingResponse(output, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers=headers)
-
-    except Exception as e:
-        return {"error": str(e)} 
-
-
-
-
-
-
-
-
-@app.post("/upload-2/")
-async def upload_csv(file2: UploadFile = File(...)):
-    try:
-        # Check if the uploaded file is a CSV or Excel file
-        if file2.content_type not in ["text/csv", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]:
-            return {"error": "File must be a CSV or XLSX"}
-
-        contents2 = await file2.read()
-        print("File2 contents read successfully.")
-        
-        # Decode and clean the CSV data
-        cleaned_data = contents2.decode("utf-8").replace('\r\n', '\n').replace('\r', '\n')
-        
-        # Create DataFrame from the cleaned CSV data
-        df1 = pd.read_csv(io.StringIO(cleaned_data))
-
-        # Debug: Print the initial DataFrame and its columns
-        print("Initial DataFrame:\n", df1.head())
-        print("DataFrame columns:", df1.columns)
-
-        # Standardize column names
-        df1.columns = df1.columns.str.strip().str.lower()
-
-        # Check if 'total' column exists
-        if 'total' not in df1.columns:
-            raise ValueError("The 'total' column is missing from the DataFrame.")
-
-        # Process the DataFrame
-        if "type" in df1.columns:
-            df1 = df1[df1["type"] != "Transfer"]
-            df1 = df1.rename(columns={"type": "Payment Type"})
-            print("Renamed columns:", df1.columns)
-
-            
-            print("Unique Payment Types before replacement:", df1["Payment Type"].unique())
-
-            df1["Payment Type"] = df1["Payment Type"].replace({
-                "Adjustment": "Order",
-                "FBA Inventory Fee": "Order",
-                "Fulfillment Fee": "Order",
-                "Refund": "Order",
-                "Service fee": "Order",
-                "Refund": "Return"
-            })
-
-          
-            df1['total'] = df1['total'].astype(str).str.replace(',', '').astype(float)
-
-        else:
-            print("Column 'type' not found in DataFrame.")
-
-        df1["Transaction Type"] = "payment"
-        df1 = df1.fillna("")
-
-     
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            df1.to_excel(writer, index=False, sheet_name='ProcessedData')
-        
-        output.seek(0)
-
-       
-        return StreamingResponse(output, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-                                 headers={"Content-Disposition": f"attachment; filename={file2.filename.split('.')[0]}_processed.xlsx"})
-
-    except Exception as e:
-        print("Error processing file:", e)
-        return {"error": str(e)}
-    
-
-
-
+DATABASE_URL = "postgresql://postgres:hello%40post123@localhost/labsassigment"
+engine = create_engine(DATABASE_URL)
 
 @app.post("/upload-both")
 async def upload_both(file: UploadFile = File(...), file2: UploadFile = File(...)):
     try:
+        logger.info("Starting file upload and processing")
+
         # Check if both uploaded files are CSV or Excel files
         if file.content_type not in ["text/csv", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"] or \
            file2.content_type not in ["text/csv", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"]:
+            logger.error("Invalid file types uploaded")
             return {"error": "Both files must be either CSV or XLSX"}
 
-        # Read the first file into a DataFrame
+        # Read the first file (Payment Report) into a DataFrame
         contents1 = await file.read()
         if file.content_type == "text/csv":
             df1 = pd.read_csv(io.StringIO(contents1.decode("utf-8")))
         else:
             df1 = pd.read_excel(io.BytesIO(contents1))
+        logger.info(f"Payment Report loaded. Shape: {df1.shape}")
 
-        # Read the second file into another DataFrame
+        # Read the second file (MTR) into another DataFrame
         contents2 = await file2.read()
         if file2.content_type == "text/csv":
             df2 = pd.read_csv(io.StringIO(contents2.decode("utf-8")))
         else:
             df2 = pd.read_excel(io.BytesIO(contents2))
+        logger.info(f"MTR Report loaded. Shape: {df2.shape}")
 
         if df1.empty or df2.empty:
+            logger.error("One of the uploaded files is empty or not properly formatted")
             return {"error": "One of the uploaded files is empty or not properly formatted"}
 
         # Standardize column names
         df1.columns = df1.columns.str.strip().str.lower()
         df2.columns = df2.columns.str.strip().str.lower()
 
-        # Process the first DataFrame (file1)
+        # Process the Payment Report (df1)
         if "type" in df1.columns:
             df1 = df1[df1["type"] != "transfer"]
             df1 = df1.rename(columns={"type": "payment type"})
@@ -173,40 +69,167 @@ async def upload_both(file: UploadFile = File(...), file2: UploadFile = File(...
                 "service fee": "order",
                 "refund": "return"
             })
+            df1["transaction type"] = "payment"
         else:
-            return {"error": "'type' column not found in the first file"}
-        
-        df1["transaction type"] = "payment"
+            logger.error("'type' column not found in the Payment Report")
+            return {"error": "'type' column not found in the Payment Report"}
 
-        # Process the second DataFrame (file2)
+        # Process the MTR Report (df2)
         if "transaction type" in df2.columns:
             df2 = df2[df2["transaction type"] != "Cancel"]
             df2["transaction type"] = df2["transaction type"].replace({
                 "Refund": "Return",
-                "freereplacement": "return"
+                "free replacement": "return"
             })
         else:
-            return {"error": "'transaction type' column not found in the second file"}
+            logger.error("'transaction type' column not found in the MTR Report")
+            return {"error": "'transaction type' column not found in the MTR Report"}
 
-        # Concatenate DataFrames by appending rows, ignoring any index
+        # Merge the DataFrames
         merged_df = pd.concat([df1, df2], ignore_index=True)
+        logger.info(f"Merged dataframe shape: {merged_df.shape}")
 
-        # Fill missing values with empty strings
-        merged_df = merged_df.fillna("")
+        # Clean the data
+        merged_df = merged_df.apply(lambda x: x.str.strip() if x.dtype == "object" else x)
+        numeric_columns = ["total", "invoice amount"]
+        for column in numeric_columns:
+            if column in merged_df.columns:
+                merged_df[column] = pd.to_numeric(merged_df[column].replace({r',': ''}, regex=True), errors='coerce')
 
-        # Save the merged DataFrame to an Excel file in memory
-        output = io.BytesIO()
-        with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-            merged_df.to_excel(writer, index=False, sheet_name='MergedData')
-        output.seek(0)
+        # Handle empty Order IDs
+        empty_order_summary = merged_df[merged_df['order id'].isna() | (merged_df['order id'] == '')].groupby('description')['total'].sum().reset_index()
+        logger.info(f"Empty Order ID summary: {empty_order_summary.to_dict(orient='records')}")
 
-        headers = {
-            'Content-Disposition': 'attachment; filename="merged_processed.xlsx"'
+        # Categorize the data
+        def categorize(row):
+            if pd.isna(row['order id']) or row['order id'] == '':
+                return 'Empty Order ID'
+            elif len(str(row['order id'])) == 10:
+                return 'Removal Order IDs'
+            elif row['transaction type'] == 'Return' and not pd.isna(row['invoice amount']):
+                return 'Return'
+            elif row['transaction type'] == 'Payment' and row['total'] < 0:
+                return 'Negative Payout'
+            elif not pd.isna(row['total']) and not pd.isna(row['invoice amount']):
+                return 'Order & Payment Received'
+            elif not pd.isna(row['total']) and pd.isna(row['invoice amount']):
+                return 'Order Not Applicable but Payment Received'
+            elif pd.isna(row['total']) and not pd.isna(row['invoice amount']):
+                return 'Payment Pending'
+            else:
+                return 'Uncategorized'
+
+        merged_df['category'] = merged_df.apply(categorize, axis=1)
+        category_summary = merged_df['category'].value_counts()
+        logger.info(f"Category summary: {category_summary.to_dict()}")
+
+        # Calculate tolerance status
+        def calculate_tolerance(row):
+            if pd.isna(row['total']) or pd.isna(row['invoice amount']) or row['invoice amount'] == 0:
+                return 'N/A'
+            ratio = (row['total'] / row['invoice amount']) * 100
+            pna = row['total']
+            if 0 < pna <= 300 and ratio > 50:
+                return 'Within Tolerance'
+            elif 300 < pna <= 500 and ratio > 45:
+                return 'Within Tolerance'
+            elif 500 < pna <= 900 and ratio > 43:
+                return 'Within Tolerance'
+            elif 900 < pna <= 1500 and ratio > 38:
+                return 'Within Tolerance'
+            elif pna > 1500 and ratio > 30:
+                return 'Within Tolerance'
+            else:
+                return 'Tolerance Breached'
+
+        merged_df['tolerance_status'] = merged_df.apply(calculate_tolerance, axis=1)
+        
+        # Create summary data with tolerance breakdown
+        summary_data = []
+        for category in category_summary.index:
+            category_df = merged_df[merged_df['category'] == category]
+            tolerance_counts = category_df['tolerance_status'].value_counts()
+            
+            summary_data.append({
+                'category': category,
+                'count': category_summary[category],
+                'tolerance_within': tolerance_counts.get('Within Tolerance', 0),
+                'tolerance_breached': tolerance_counts.get('Tolerance Breached', 0),
+                'tolerance_na': tolerance_counts.get('N/A', 0)
+            })
+
+        summary_df = pd.DataFrame(summary_data)
+
+        # Add a total row
+        total_row = pd.DataFrame({
+            'category': ['Total'],
+            'count': [summary_df['count'].sum()],
+            'tolerance_within': [summary_df['tolerance_within'].sum()],
+            'tolerance_breached': [summary_df['tolerance_breached'].sum()],
+            'tolerance_na': [summary_df['tolerance_na'].sum()]
+        })
+        summary_df = pd.concat([summary_df, total_row], ignore_index=True)
+
+        # Prepare data for database insertion
+        columns_to_insert = ["order id", "transaction type", "payment type", "invoice amount", "total", "description", "order date", "category", "tolerance_status"]
+        df_to_insert = merged_df[columns_to_insert]
+
+        # Define the SQLAlchemy types for the columns
+        sql_dtypes = {
+            'order id': types.Text(),
+            'transaction type': types.Text(),
+            'payment type': types.Text(),
+            'invoice amount': types.Float(),
+            'total': types.Float(),
+            'description': types.Text(),
+            'order date': types.DateTime(),
+            'category': types.Text(),
+            'tolerance_status': types.Text()
         }
-        return StreamingResponse(output, media_type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', headers=headers)
+
+        # Save the processed DataFrame to the database
+        table_name = "processed_transactions"
+        df_to_insert.to_sql(table_name, engine, if_exists='replace', index=False, dtype=sql_dtypes)
+        logger.info(f"Successfully inserted {len(df_to_insert)} rows into the database")
+
+        # Save the summary DataFrame to the database
+        summary_table_name = "summary_table"
+        summary_sql_dtypes = {
+            'category': types.Text(),
+            'count': types.Integer(),
+            'tolerance_within': types.Integer(),
+            'tolerance_breached': types.Integer(),
+            'tolerance_na': types.Integer()
+        }
+        summary_df.to_sql(summary_table_name, engine, if_exists='replace', index=False, dtype=summary_sql_dtypes)
+        logger.info(f"Successfully inserted {len(summary_df)} rows into the summary table")
+
+        return JSONResponse(content={
+            "message": f"Successfully processed {len(df_to_insert)} rows",
+            "empty_order_summary": empty_order_summary.to_dict(orient='records'),
+            "summary_table": summary_df.to_dict(orient='records')
+        })
 
     except Exception as e:
-        print("Error processing files:", e)
-        return {"error": str(e)}
-
-
+        logger.error(f"Error processing files: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    
+@app.get("/get-summary")
+async def get_summary():
+    try:
+        logger.info("Fetching summary data from the database")
+        query = "SELECT * FROM summary_table"
+        df = pd.read_sql(query, engine)
+        
+        if df.empty:
+            logger.warning("No summary data found in the database")
+            return JSONResponse(content={"message": "No summary data available"}, status_code=404)
+        
+        summary_data = df.to_dict(orient='records')
+        logger.info(f"Successfully retrieved {len(summary_data)} rows of summary data")
+        return JSONResponse(content={"summary_data": summary_data})
+    
+    except Exception as e:
+        logger.error(f"Error fetching summary data: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
+    
